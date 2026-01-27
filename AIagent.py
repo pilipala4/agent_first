@@ -19,3 +19,4 @@ completion = client.chat.completions.create(
 
 if __name__ == '__main__':
     print(completion.model_dump_json())
+    print("炸憨")
