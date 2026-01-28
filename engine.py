@@ -1,9 +1,10 @@
 import os
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 from openai import OpenAI
 from dotenv import load_dotenv
+from functools import wraps
 
 from openai._exceptions import (
     AuthenticationError,
@@ -19,10 +20,11 @@ except ImportError:
     try:
         from openai import APITimeoutError as Timeout
     except ImportError:
-        # 如果都找不到，定义一个占位符
         class Timeout(Exception):
             pass
-load_dotenv()  # 加载 .env 文件
+
+load_dotenv()
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -34,9 +36,78 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 配置常量
+DEFAULT_MODEL = "qwen3-32b"
+DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def handle_llm_exceptions(func):
+    """装饰器：统一处理 LLM API 异常"""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except AuthenticationError as e:
+            error_msg = f"认证错误: {str(e)}"
+            logger.error(error_msg)
+            return _create_error_result("AuthenticationError", error_msg)
+        except RateLimitError as e:
+            error_msg = f"速率限制错误: {str(e)}"
+            logger.warning(error_msg)
+            return _create_error_result("RateLimitError", error_msg)
+        except APIConnectionError as e:
+            error_msg = f"网络连接错误: {str(e)}"
+            logger.error(error_msg)
+            return _create_error_result("APIConnectionError", error_msg)
+        except APIError as e:
+            error_msg = f"API 错误: {str(e)}"
+            logger.error(error_msg)
+            return _create_error_result("APIError", error_msg)
+        except Timeout as e:
+            error_msg = f"请求超时: {str(e)}"
+            logger.error(error_msg)
+            return _create_error_result("Timeout", error_msg)
+        except Exception as e:
+            error_msg = f"未知错误: {str(e)}"
+            logger.error(error_msg)
+            return _create_error_result("UnknownError", error_msg)
+
+    return wrapper
+
+
+def _create_error_result(error_type: str, error_message: str) -> Dict[str, Any]:
+    """创建错误结果的辅助函数"""
+    return {
+        "success": False,
+        "error_type": error_type,
+        "error_message": error_message,
+        "data": None
+    }
+
+
+def _get_usage_info(usage) -> Dict[str, Any]:
+    """获取使用情况信息，兼容不同版本"""
+    if hasattr(usage, 'model_dump'):
+        return usage.model_dump()
+    elif hasattr(usage, 'dict'):
+        return usage.dict()
+    else:
+        return {}
+
+
+def _log_api_call_start(model: str, messages_count: int):
+    """记录 API 调用开始"""
+    logger.info(f"开始调用 LLM API: model={model}, messages_count={messages_count}")
+
+
+def _log_api_call_success(model: str, tokens_used: int):
+    """记录 API 调用成功"""
+    logger.info(f"LLM API 调用成功: model={model}, tokens_used={tokens_used}")
+
 
 class LLMClient:
-    def __init__(self, api_key: str = None, base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"):
+    def __init__(self, api_key: str = None, base_url: str = DEFAULT_BASE_URL):
         """
         初始化 LLM 客户端
 
@@ -54,16 +125,19 @@ class LLMClient:
             base_url=base_url,
         )
 
+    @handle_llm_exceptions
     def call_llm(
             self,
-            messages: list,
-            model: str = "qwen3-32b",
+            messages: List[Dict],
+            model: str = DEFAULT_MODEL,
             temperature: float = 0.7,
             max_tokens: int = 2000,
-            response_format: Optional[Dict] = None
+            response_format: Optional[Dict] = None,
+            retry_times: int = 3,
+            retry_delay: float = 1.0
     ) -> Dict[str, Any]:
         """
-        调用 LLM API 并处理异常
+        调用 LLM API 并处理异常，支持重试机制
 
         Args:
             messages: 消息列表
@@ -71,107 +145,69 @@ class LLMClient:
             temperature: 温度参数
             max_tokens: 最大 token 数
             response_format: 响应格式
+            retry_times: 重试次数
+            retry_delay: 重试延迟（秒）
 
         Returns:
             包含响应结果或错误信息的字典
         """
-        # 记录调用开始
-        logger.info(f"开始调用 LLM API: model={model}, messages_count={len(messages)}")
+        import time
 
-        try:
-            # 构建请求参数
-            params = {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "extra_body": {"enable_thinking": False}
-            }
+        for attempt in range(retry_times):
+            try:
+                # 记录调用开始
+                _log_api_call_start(model, len(messages))
 
-            if response_format:
-                params["response_format"] = response_format
+                # 构建请求参数
+                params = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "extra_body": {"enable_thinking": False}
+                }
 
-            # 执行 API 调用
-            completion = self.client.chat.completions.create(**params)
+                if response_format:
+                    params["response_format"] = response_format
 
-            # 解析响应
-            result = {
-                "success": True,
-                "data": completion.choices[0].message.content,
-                "model": completion.model,
-                "usage": completion.usage.dict() if hasattr(completion.usage, 'dict') else {},
-                "request_id": getattr(completion, 'id', None)
-            }
+                # 执行 API 调用
+                completion = self.client.chat.completions.create(**params)
 
-            logger.info(f"LLM API 调用成功: model={model}, tokens_used={result['usage'].get('total_tokens', 0)}")
-            return result
+                # 解析响应
+                usage_info = _get_usage_info(completion.usage)
+                result = {
+                    "success": True,
+                    "data": completion.choices[0].message.content,
+                    "model": completion.model,
+                    "usage": usage_info,
+                    "request_id": getattr(completion, 'id', None)
+                }
 
-        except AuthenticationError as e:
-            error_msg = f"认证错误: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "error_type": "AuthenticationError",
-                "error_message": error_msg,
-                "data": None
-            }
+                tokens_used = result['usage'].get('total_tokens', 0)
+                _log_api_call_success(model, tokens_used)
 
-        except RateLimitError as e:
-            error_msg = f"速率限制错误: {str(e)}"
-            logger.warning(error_msg)
-            return {
-                "success": False,
-                "error_type": "RateLimitError",
-                "error_message": error_msg,
-                "data": None
-            }
+                return result
 
-        except APIConnectionError as e:
-            error_msg = f"网络连接错误: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "error_type": "APIConnectionError",
-                "error_message": error_msg,
-                "data": None
-            }
-
-        except APIError as e:
-            error_msg = f"API 错误: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "error_type": "APIError",
-                "error_message": error_msg,
-                "data": None
-            }
-
-        except Timeout as e:
-            error_msg = f"请求超时: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "error_type": "Timeout",
-                "error_message": error_msg,
-                "data": None
-            }
-
-        except Exception as e:
-            error_msg = f"未知错误: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "error_type": "UnknownError",
-                "error_message": error_msg,
-                "data": None
-            }
+            except (RateLimitError, APIConnectionError, Timeout) as e:
+                # 对于可重试的错误进行重试
+                if attempt < retry_times - 1:
+                    logger.warning(f"第 {attempt + 1} 次尝试失败，{retry_delay} 秒后重试: {str(e)}")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    # 重试次数用完，抛出异常让装饰器处理
+                    raise e
+            except Exception as e:
+                # 其他异常直接抛出
+                raise e
 
 
 # 便捷调用函数
 def llm_call(
         prompt: str,
         system_prompt: str = "You are a helpful assistant.",
-        model: str = "qwen3-32b",
+        model: str = DEFAULT_MODEL,
+        retry_times: int = 3,
         **kwargs
 ) -> Dict[str, Any]:
     """
@@ -181,6 +217,7 @@ def llm_call(
         prompt: 用户输入提示
         system_prompt: 系统提示
         model: 模型名称
+        retry_times: 重试次数
         **kwargs: 其他参数
 
     Returns:
@@ -190,12 +227,7 @@ def llm_call(
     api_key = os.getenv('DASHSCOPE_API_KEY')
     if not api_key:
         logger.error("未找到 DASHSCOPE_API_KEY 环境变量")
-        return {
-            "success": False,
-            "error_type": "ConfigurationError",
-            "error_message": "未找到 DASHSCOPE_API_KEY 环境变量",
-            "data": None
-        }
+        return _create_error_result("ConfigurationError", "未找到 DASHSCOPE_API_KEY 环境变量")
 
     client = LLMClient(api_key=api_key)
 
@@ -204,7 +236,7 @@ def llm_call(
         {"role": "user", "content": prompt}
     ]
 
-    return client.call_llm(messages, model=model, **kwargs)
+    return client.call_llm(messages, model=model, retry_times=retry_times, **kwargs)
 
 
 # 重构的 StructuredAgent 类
@@ -268,7 +300,7 @@ class StructuredAgent:
 }}
 """
 
-    def chat_completion(self, prompt: str, model: str = "qwen3-32b") -> Dict[str, Any]:
+    def chat_completion(self, prompt: str, model: str = DEFAULT_MODEL, retry_times: int = 3) -> Dict[str, Any]:
         """通用聊天完成方法"""
         result = self.llm_client.call_llm(
             messages=[
@@ -279,7 +311,8 @@ class StructuredAgent:
                 {"role": "user", "content": prompt}
             ],
             model=model,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            retry_times=retry_times
         )
 
         if result["success"]:
@@ -306,7 +339,7 @@ def main():
 
 if __name__ == '__main__':
     # 简单调用
-    result = llm_call("你好，世界！")
+    result = llm_call("你好，世界！", retry_times=2)
     if result["success"]:
         print(result["data"])
     else:
@@ -314,5 +347,6 @@ if __name__ == '__main__':
 
     # 结构化代理
     agent = StructuredAgent()
-    math_result = agent.chat_completion(agent.create_math_prompt("2x + 5 = 15"))
+    math_result = agent.chat_completion(agent.create_math_prompt("2x + 5 = 15"), retry_times=2)
     print("数学解题结果:", json.dumps(math_result, ensure_ascii=False, indent=2))
+
