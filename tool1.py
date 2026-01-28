@@ -1,10 +1,16 @@
 import os
 import json
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()  # 加载 .env 文件
+
 
 
 class StructuredAgent:
-    def __init__(self, api_key: str = "Your_api_key"):
+    def __init__(self, api_key: str = None):
+        if api_key is None:
+            api_key = os.getenv('DASHSCOPE_API_KEY')
         self.client = OpenAI(
             api_key=api_key,
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -111,14 +117,16 @@ def main():
 
 
 if __name__ == '__main__':
-    agent = StructuredAgent(api_key="sk-c623a1cc24994267817be693b0eed911")
+    agent = StructuredAgent()
 
     # 数学问题求解
     math_result = agent.chat_completion(
         agent.create_math_prompt("2x + 5 = 15, 求x的值")
     )
+    print("数学解题结果:", json.dumps(math_result, ensure_ascii=False, indent=2))
 
     # 文案生成
     copy_result = agent.chat_completion(
         agent.create_copywriting_prompt("为新产品写推广文案")
     )
+    print("文案生成结果:", json.dumps(copy_result, ensure_ascii=False, indent=2))
