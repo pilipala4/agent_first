@@ -382,6 +382,7 @@ class ConversationAgent:
 
             if response["success"]:
                 # 添加助手回复到历史记录
+                '''
                 assistant_reply = response.get("parsed_data", {}).get("generated_copy", response["data"])
                 self.add_to_history("assistant", assistant_reply)
 
@@ -390,6 +391,17 @@ class ConversationAgent:
                 # 发生错误时仍记录到历史
                 error_msg = f"助手暂时无法回应: {response['error_message']}"
                 self.add_to_history("assistant", error_msg)
+                '''
+                # 安全地获取助手回复
+                parsed_data = response.get("parsed_data")
+                if isinstance(parsed_data, dict):
+                    assistant_reply = parsed_data.get("generated_copy", response["data"])
+                elif isinstance(parsed_data, (int, float)):  # 如果是数字类型
+                    assistant_reply = str(parsed_data)
+                else:
+                    assistant_reply = response.get("data", "")
+
+                self.add_to_history("assistant", assistant_reply)
                 return response
 
         except Exception as e:
