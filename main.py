@@ -289,11 +289,6 @@ class ConversationAgent:
             # ✅ 关键修复：获取上下文并传入
             context_history = self.get_conversation_context()
 
-            # ✅ 只调用一次，且传入上下文
-            response = self.agent.process_with_tools(
-                prompt=cleaned_input,
-                context_history=context_history  # 👈 传入上下文！
-            )
             if "搜索总结" in cleaned_input:
                 response = self.agent.process_combined_search_summary(prompt=cleaned_input,
                                                                       context_history=context_history)
