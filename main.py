@@ -2,6 +2,7 @@ import re
 import os
 import json
 import logging
+import time
 from typing import Dict, Any, Optional, List, Union
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -34,9 +35,9 @@ class StructuredAgent:
         self.llm_client = LLMClient(api_key)
         self.tool_manager = ToolManager(api_key)
 
-    def process_with_tools(self, prompt: str, context_history: List[Dict] = None, model: str = DEFAULT_MODEL) -> Dict[str, Any]:
+    def process_with_tools(self, prompt: str, context_history: List[Dict] = None, model: str = DEFAULT_MODEL, max_retries: int = 2) -> Dict[str, Any]:
         """
-        处理包含工具调用的请求，支持对话上下文
+        处理包含工具调用的请求，支持对话上下文和重试机制
         """
         tool_decision = determine_tool_usage(prompt, self.tool_manager)
 
@@ -44,16 +45,20 @@ class StructuredAgent:
             tool_name = tool_decision["tool_name"]
             arguments = tool_decision["arguments"]
 
-            tool_func = self.tool_manager.tools[tool_name]
-            tool_result = tool_func(**arguments)
+            retries = 0
+            while retries <= max_retries:
+                try:
+                    tool_func = self.tool_manager.tools[tool_name]
+                    tool_result = tool_func(**arguments)
 
-            # 构建上下文字符串（如果存在）
-            context_str = ""
-            if context_history:
-                context_str = f"根据以下对话历史背景：\n{json.dumps(context_history, ensure_ascii=False, indent=2)}"
+                    if tool_result["success"]:
+                        #构建上下文字符串（如果存在）
+                        context_str = ""
+                        if context_history:
+                            context_str = f"根据以下对话历史背景：\n{json.dumps(context_history, ensure_ascii=False, indent=2)}"
 
-            if tool_result["success"]:
-                enhanced_prompt = f"""
+
+                        enhanced_prompt = f"""
 原始问题：{prompt}
 
 工具调用结果：
@@ -63,30 +68,70 @@ class StructuredAgent:
 
 请基于以上信息回答原始问题。
 """.strip()
-            else:
-                enhanced_prompt = f"""
-原始问题：{prompt}
 
-工具调用失败：{tool_result.get('error', '未知错误')}
+                        return self.chat_completion(enhanced_prompt, model=model)
+                    else:
+                        # 工具调用失败，进入重试逻辑
+                        retries += 1
+                        if retries > max_retries:
+                            break
+                        time.sleep(1)  # 等待1秒后重试
+                except Exception as e:
+                    logger.error(f"工具调用异常: {e}")
+                    retries += 1
+                    if retries > max_retries:
+                        break
+                    time.sleep(1)
 
-{context_str}
-
-请尝试其他方式回答问题或告知用户工具调用失败。
-""".strip()
-
-            return self.chat_completion(enhanced_prompt, model=model)
+                    # 降级策略：工具调用失败返回默认信息
+            return {
+                    "success": False,
+                    "error_type": "ToolCallFailed",
+                    "error_message": "暂无法获取信息",
+                    "data": None
+            }
         else:
-            # 不使用工具：将上下文融入提示
+            # 不使用工具的情况保持原有逻辑
             if context_history:
                 context_str = "\n".join([
                     f"{msg['role']}: {msg['content']}"
-                    for msg in context_history[-6:]  # 最近2轮对话
+                    for msg in context_history[-6:]
                 ])
                 full_prompt = f"之前的对话:\n{context_str}\n\n当前问题: {prompt}"
             else:
                 full_prompt = prompt
 
             return self.chat_completion(full_prompt, model=model)
+
+    def process_combined_search_summary(self, prompt: str, context_history: List[Dict] = None,
+                                        model: str = DEFAULT_MODEL) -> Dict[str, Any]:
+        """
+        组合调用“搜索”和“总结”工具
+        """
+        # 第一步：调用搜索工具
+        search_result = self.process_with_tools(prompt=f"搜索相关内容：{prompt}", context_history=context_history,
+                                                model=model)
+        if not search_result["success"]:
+            return search_result  # 搜索失败直接返回
+
+        # 第二步：提取搜索结果并生成总结
+        search_data = search_result.get("data", "")
+        summary_prompt = f"请根据以下搜索结果生成一段总结：\n{search_data}"
+        summary_result = self.chat_completion(summary_prompt, model=model)
+
+        if summary_result["success"]:
+            # 整合搜索和总结结果
+            combined_result = {
+                "success": True,
+                "data": {
+                    "search_result": search_data,
+                    "summary": summary_result.get("data", "")
+                },
+                "parsed_data": summary_result.get("parsed_data")
+            }
+            return combined_result
+        else:
+            return summary_result  # 总结失败返回对应错误
 
     def create_math_prompt(self, problem: str) -> str:
         return f"""
@@ -229,6 +274,7 @@ class ConversationAgent:
 
     def chat(self, user_input: str) -> Dict[str, Any]:
         is_valid, validation_msg, cleaned_input = self.input_validator.validate_and_clean(user_input)
+
         if not is_valid:
             return {
                 "success": False,
@@ -248,6 +294,11 @@ class ConversationAgent:
                 prompt=cleaned_input,
                 context_history=context_history  # 👈 传入上下文！
             )
+            if "搜索总结" in cleaned_input:
+                response = self.agent.process_combined_search_summary(prompt=cleaned_input,
+                                                                      context_history=context_history)
+            else:
+                response = self.agent.process_with_tools(prompt=cleaned_input, context_history=context_history)
 
             if response["success"]:
                 parsed_data = response.get("parsed_data")
