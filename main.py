@@ -80,7 +80,7 @@ class StructuredAgent:
             if context_history:
                 context_str = "\n".join([
                     f"{msg['role']}: {msg['content']}"
-                    for msg in context_history[-4:]  # 最近2轮对话
+                    for msg in context_history[-6:]  # 最近2轮对话
                 ])
                 full_prompt = f"之前的对话:\n{context_str}\n\n当前问题: {prompt}"
             else:

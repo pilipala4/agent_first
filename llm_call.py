@@ -25,7 +25,7 @@ except ImportError:
 load_dotenv()
 
 # 配置常量
-DEFAULT_MODEL = "qwen-plus-2025-12-01"
+DEFAULT_MODEL = "qwen3-max-2026-01-23"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
