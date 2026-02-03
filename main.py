@@ -183,6 +183,27 @@ class ConversationAgent:
         """获取当前对话上下文"""
         return self.conversation_history.copy()
 
+    def handle_history_query(self, user_input: str) -> bool:
+        """判断是否为历史查询请求"""
+        history_keywords = [
+            "前面问了什么", "之前的问题", "历史记录",
+            "对话历史", " earlier questions", "previous questions"
+        ]
+        return any(keyword in user_input.lower() for keyword in history_keywords)
+
+    def get_previous_questions_summary(self) -> str:
+        """获取之前问题的摘要"""
+        user_messages = [
+            msg for msg in self.conversation_history
+            if msg["role"] == "user" and msg["content"] != "我这轮对话中前面问了什么问题"
+        ]
+
+        if len(user_messages) <= 1:  # 只有当前这个问题
+            return "这是我们第一轮对话，您还没有问过其他问题。"
+
+        previous_questions = [msg["content"] for msg in user_messages[:-1]]
+        return f"您之前问过的问题包括：{'；'.join(previous_questions)}"
+
     def clear_history(self):
         """清空对话历史"""
         self.conversation_history.clear()
@@ -198,12 +219,22 @@ class ConversationAgent:
                 "error_message": validation_msg,
                 "data": None
             }
+        # 特殊处理：历史查询
+        if self.handle_history_query(cleaned_input):
+            summary = self.get_previous_questions_summary()
+            self.add_to_history("assistant", summary)
+            return {
+                "success": True,
+                "data": summary,
+                "parsed_data": {"summary": summary}
+            }
 
         # 添加用户输入到历史记录
         self.add_to_history("user", cleaned_input)
         #self.add_to_history("user", user_input)
 
         try:
+            '''
             # 构建完整的消息历史
             messages = self._build_messages()
 
@@ -212,6 +243,7 @@ class ConversationAgent:
                 prompt=self._format_current_prompt(cleaned_input),
                 retry_times=2
             )
+            '''
             # 使用工具增强处理
             response = self.agent.process_with_tools(cleaned_input)
 
@@ -257,7 +289,7 @@ class ConversationAgent:
         for msg in recent_history:
             messages.append({
                 "role": msg["role"],
-                "content": msg["content"]
+                "content": f"[{msg['timestamp']}] {msg['content']}"
             })
 
         return messages
