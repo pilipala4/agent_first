@@ -53,68 +53,87 @@ class DocumentRAG:
         return clean_text
 
     def chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
-        """将文本分割成块，优化关键部分识别"""
+        """智能分块：确保标题（含'引言'）独立成块"""
+        # 中英文常见标题关键词（按学术论文结构排序）
+        title_keywords = [
+            '摘要', 'Abstract', '引言', 'Introduction', '绪论', '背景', 'Background',
+            '相关工作', 'Related Work', '方法', 'Method', 'Methodology', '实验', 'Experiment',
+            '结果', 'Result', '讨论', 'Discussion', '结论', 'Conclusion', '参考文献', 'References',
+            '致谢', 'Acknowledgement', '附录', 'Appendix'
+        ]
+
+        # 构建健壮的标题匹配正则（匹配：换行+可选编号+标题词+标点+换行）
+        pattern = r'(\n\s*(?:' \
+                  r'(?:第[零一二三四五六七八九十百千]+[章节]|Chapter\s*\d+|[0-9]+\.[0-9]*|[\dIVX]+)\s*[:：]?\s*)?' \
+                  r'(?:' + '|'.join(re.escape(kw) for kw in title_keywords) + r')' \
+                                                                              r'\s*[:：]?\s*\n)'
+
+        sections = re.split(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
+
+        # 无标题匹配 → 全文按基础逻辑分割
+        if len(sections) <= 1:
+            return self._split_text_with_overlap(text, chunk_size, overlap)
+
         chunks = []
-        start = 0
+        # sections[0]: 标题前的前置内容（如封面文字）
+        if sections[0].strip():
+            chunks.extend(self._split_text_with_overlap(sections[0], chunk_size, overlap))
 
-        # 优化分块逻辑：确保章节标题能成为独立块
-        # 首先按章节标题分割
-        sections = re.split(r'(\d+\s*[\u4e00-\u9fa5]+)', text)
+        # 交替处理：[标题, 内容, 标题, 内容...]
+        for i in range(1, len(sections), 2):
+            title_part = sections[i].strip() if i < len(sections) else ""
+            content_part = sections[i + 1] if i + 1 < len(sections) else ""
 
-        if len(sections) > 1:
-            # 重新组织文本，确保章节标题单独成块
-            for i in range(1, len(sections), 2):
-                section_title = sections[i].strip()
-                section_content = sections[i + 1].strip() if i + 1 < len(sections) else ""
+            # 标题块独立保留（关键！确保"引言"等完整存在）
+            if title_part:
+                chunks.append(title_part)  # 不strip换行，保留原始格式特征
 
-                # 确保章节标题单独成块
-                if section_title:
-                    chunks.append(section_title)
-
-                # 分割章节内容
-                if section_content:
-                    section_chunks = self._split_text_with_overlap(section_content, chunk_size, overlap)
-                    chunks.extend(section_chunks)
-        else:
-            # 如果没有章节标题，使用默认分块
-            while start < len(text):
-                end = start + chunk_size
-                # 确保不在单词中间切分
-                if end < len(text):
-                    # 找到下一个空格位置
-                    next_space = text.find(' ', end)
-                    if next_space != -1 and next_space - end < 50:
-                        # 如果距离太远则忽略
-                        end = next_space
-                    chunk = text[start:end]
-                    chunks.append(chunk)
-                    # 计算下一个开始位置，考虑重叠
-                    start = end - overlap
-                else:
-                    chunks.append(text[start:])
-                    start = len(text)
+            # 内容块安全分割
+            if content_part.strip():
+                chunks.extend(self._split_text_with_overlap(content_part, chunk_size, overlap))
 
         return chunks
+
+
 
     def _split_text_with_overlap(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
-        """辅助函数：按指定大小和重叠分割文本"""
+        """安全分割长文本块（保留语义边界）"""
+        if not text.strip():
+            return []
         chunks = []
         start = 0
-        while start < len(text):
-            end = start + chunk_size
-            if end >= len(text):
-                chunks.append(text[start:])
-                break
-            # 找到下一个空格位置
-            next_space = text.find(' ', end)
-            if next_space != -1 and next_space - end < 50:
-                end = next_space
-            chunk = text[start:end]
-            chunks.append(chunk)
-            start = end - overlap
+        text_len = len(text)
+
+        while start < text_len:
+            end = min(start + chunk_size, text_len)
+            # 优先在句子结尾/换行处分割
+            if end < text_len:
+                # 尝试找最近的句号、换行或空格
+                candidates = [
+                    text.rfind('.', start, end),
+                    text.rfind('。', start, end),
+                    text.rfind('\n', start, end),
+                    text.rfind(' ', start, end)
+                ]
+                valid_pos = [p for p in candidates if p != -1 and p > start]
+                if valid_pos:
+                    end = max(valid_pos) + 1  # 包含标点
+
+            chunk = text[start:end].strip()
+            if chunk:  # 跳过空块
+                chunks.append(chunk)
+
+            # 计算下个起点（避免负索引）
+            next_start = end - overlap
+            if next_start <= start:  # 防止死循环
+                next_start = end
+            start = next_start
+
         return chunks
 
-    def add_document(self, file_path: str, doc_type: str = None, metadata: Optional[Dict] = None):
+
+
+    def add_document(self, file_path: str, doc_type: str = None, metadata: Optional[Dict] = None, chunk_size: int = 500, overlap: int = 50):
         """添加文档到向量数据库，支持自定义元数据"""
         if not metadata:
             metadata = {}
@@ -136,7 +155,9 @@ class DocumentRAG:
             raise ValueError(f"Unsupported document type: {doc_type}")
 
         # 分块处理
-        chunks = self.chunk_text(content)
+        chunks = self.chunk_text(text=content, chunk_size=chunk_size, overlap=overlap)
+
+        
 
         # 添加到集合中
         documents = []
