@@ -35,7 +35,7 @@ class OfficeAssistantState(BaseModel):
 class OfficeAssistant:
     """办公助手工作流实现类"""
 
-    def __init__(self, api_key: str = None, db_path: str = "./office_docs_db"):
+    def __init__(self, api_key: str = None, db_path: str = "./chroma_db"):
         """
         初始化办公助手
 
@@ -131,7 +131,9 @@ class OfficeAssistant:
             action_type = str(result_data).strip().lower()
 
             # 优化决策结果 (保持原有逻辑)
-            if "文档" in state.user_input or "资料" in state.user_input or "查询" in state.user_input:
+            if "文档" in state.user_input or "资料" in state.user_input or "查询" in state.user_input or \
+               "模型" in state.user_input or "论文" in state.user_input or "技术" in state.user_input or \
+               "HIC-YOLOv5" in state.user_input or "YOLOv5" in state.user_input:
                 action_type = "rag_query"
             elif "周报" in state.user_input or "报告" in state.user_input or "总结" in state.user_input:
                 action_type = "report_generation"
@@ -193,24 +195,36 @@ class OfficeAssistant:
             return {"rag_result": f"文档查询失败：{error_msg}"}
 
     def _get_document_context(self, query: str) -> str:
-        """模拟文档检索，返回文档摘要"""
-        # 实际应用中这里应连接到RAG系统
-        # 模拟文档内容
-        document_samples = [
-            "项目A的最新进展：已完成需求分析，正在开发核心功能模块",
-            "公司政策文档：员工请假需提前3天申请，需部门经理批准",
-            "市场调研报告：Q3季度智能手机市场增长15%，主要增长区域为东南亚",
-            "项目B技术方案：采用微服务架构，使用Spring Boot和Docker",
-            "会议纪要：2023-10-05会议讨论了新产品的UI设计，确定了主要功能点"
-        ]
+        """调用 RAG 引擎进行真实文档检索"""
+        try:
+            # 执行向量检索，返回前 3 个最相关的片段
+            results = self.rag_engine.query(question=query, n_results=3)
 
-        # 简单匹配文档
-        matches = [doc for doc in document_samples if query.lower() in doc.lower()]
+            if not results:
+                return "未找到相关文档内容。"
 
-        if matches:
-            return "相关文档摘要: " + ", ".join(matches[:2])
-        else:
-            return "未找到相关文档内容。请尝试更具体的查询。"
+            # 格式化检索结果
+            context_parts = []
+            for i, res in enumerate(results):
+                source = res['metadata'].get('source', '未知来源')
+                doc_content = res['document']
+                context_parts.append(f"[来源：{os.path.basename(source)}]\n{doc_content}")
+
+            return "\n\n---\n\n".join(context_parts)
+
+        except Exception as e:
+            logger.error(f"RAG 检索异常：{e}")
+            return f"检索系统暂时不可用：{str(e)}"
+
+    def upload_document(self, file_path: str):
+        """对外提供的文档上传方法"""
+        if not os.path.exists(file_path):
+            return f"❌ 文件不存在：{file_path}"
+        try:
+            self.rag_engine.add_document(file_path)
+            return f"✅ 文档 {os.path.basename(file_path)} 已成功索引"
+        except Exception as e:
+            return f"❌ 上传失败：{str(e)}"
 
     def _report_generation_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
         """周报生成节点：生成周报"""
@@ -294,27 +308,39 @@ if __name__ == "__main__":
     print("办公助手LangGraph工作流测试")
     print("=" * 50)
 
-    # 初始化办公助手
     try:
+        # 初始化助手 (会自动初始化 RAG 引擎)
         assistant = OfficeAssistant()
         print("✅ 办公助手初始化成功")
     except ValueError as e:
-        print(f"❌ 初始化失败: {e}")
+        print(f"❌ 初始化失败：{e}")
         exit(1)
 
-    # 测试用例
+        # 1. 准备测试文档 (请确保当前目录下有这些文件，或修改为实际路径)
+        # 假设当前目录下有一个 test_report.pdf 和 meeting_notes.docx
+    test_files = [
+        "2309.16393v2.pdf",
+    ]
+
+    print("\n--- 阶段 1: 文档上传与索引 ---")
+    for file in test_files:
+        if os.path.exists(file):
+            print(assistant.upload_document(file))
+        else:
+            print(f"⚠️ 跳过不存在的文件：{file}")
+
+    # 2. 执行问答测试
+    print("\n--- 阶段 2: 智能问答测试 ---")
     test_queries = [
-        "查询项目A的最新进展",
-        "帮我写一份本周工作周报",
-        "安排下周三的团队会议",
-        "今天天气怎么样",
-        "如何设置公司邮箱的自动回复"
+        "HIC-YOLOv5模型的最新进展是什么？",  # 从PDF中可以找到关于HIC-YOLOv5的改进
+        "HIC-YOLOv5相比原始YOLOv5有哪些改进？",  # PDF中详细描述了改进点
+        "帮我写一份本周工作周报"  # 测试非RAG路径
     ]
 
     for query in test_queries:
-        print(f"\n--- 用户输入: {query} ---")
+        print(f"\n👤 用户：{query}")
         response = assistant.run(query)
-        print(f"助手回复: {response}")
+        print(f"🤖 助手：{response}")
         print("-" * 50)
 
     print("\n测试完成！")

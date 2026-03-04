@@ -2,6 +2,7 @@ import os
 import chromadb
 from chromadb.utils import embedding_functions
 from PyPDF2 import PdfReader
+from docx import Document
 import markdown
 import re
 from typing import List, Dict, Any, Optional
@@ -38,8 +39,20 @@ class DocumentRAG:
         """读取 PDF 文件内容"""
         reader = PdfReader(file_path)
         text = ""
+        '''
         for page in reader.pages:
             text += page.extract_text()
+        '''
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        return text
+
+    def read_docx(self, file_path: str) -> str:
+        """读取 Word 文件内容 (新增方法)"""
+        doc = Document(file_path)
+        text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
         return text
 
     def read_markdown(self, file_path: str) -> str:
@@ -131,6 +144,20 @@ class DocumentRAG:
 
         return chunks
 
+    def clear_database(self):
+        all_docs = self.collection.get()
+        if not all_docs["metadatas"]:
+            print("Database is already empty.")
+            return
+
+        # 提取所有文档 ID 并删除
+        doc_ids = [doc.get("id") for doc in all_docs["metadatas"] if "id" in doc]
+        if doc_ids:
+            self.collection.delete(ids=doc_ids)
+            print(f"Cleared {len(doc_ids)} documents from the database.")
+        else:
+            print("No valid document IDs found.")
+
 
 
     def add_document(self, file_path: str, doc_type: str = None, metadata: Optional[Dict] = None, chunk_size: int = 500, overlap: int = 50):
@@ -139,20 +166,29 @@ class DocumentRAG:
             metadata = {}
 
         if not doc_type:
-            if file_path.lower().endswith('.pdf'):
+            lower_path = file_path.lower()
+            if lower_path.endswith('.pdf'):
                 doc_type = 'pdf'
-            elif file_path.lower().endswith('.md'):
+            elif lower_path.endswith('.docx') or lower_path.endswith('.doc'):
+                doc_type = 'word'  # 新增 word 类型
+            elif lower_path.endswith('.md'):
                 doc_type = 'markdown'
             else:
-                raise ValueError("Unsupported file type. Only PDF and MD files are supported.")
+                raise ValueError("Unsupported file type. Only PDF, DOCX, and MD files are supported.")
 
         # 读取文档内容
         if doc_type == 'pdf':
             content = self.read_pdf(file_path)
+        elif doc_type == 'word':  # 新增分支
+            content = self.read_docx(file_path)
         elif doc_type == 'markdown':
             content = self.read_markdown(file_path)
         else:
             raise ValueError(f"Unsupported document type: {doc_type}")
+
+        if not content.strip():
+            print(f"Warning: No text extracted from {file_path}")
+            return
 
         # 分块处理
         chunks = self.chunk_text(text=content, chunk_size=chunk_size, overlap=overlap)
