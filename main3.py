@@ -20,7 +20,7 @@ from llm_call import DEFAULT_MODEL, DEFAULT_BASE_URL
 
 # 导入办公工具模块
 from tools.office_tools import OfficeToolsManager
-
+from tools.weekly_report_generator import WeeklyReportGenerator
 
 class OfficeAssistantState(BaseModel):
     """工作流状态模型"""
@@ -30,6 +30,7 @@ class OfficeAssistantState(BaseModel):
     report_result: Optional[str] = Field(default=None, description="周报生成结果")
     tool_result: Optional[str] = Field(default=None, description="通用工具执行结果")
     office_tool_result: Optional[str] = Field(default=None, description="办公工具执行结果")
+    report_file_paths: Optional[List[str]] = Field(default=None, description="周报导出文件路径")
     final_response: Optional[str] = Field(default=None, description="最终返回给用户的响应")
 
 
@@ -55,6 +56,9 @@ class OfficeAssistant:
 
         # 初始化办公工具管理器
         self.office_tools_manager = OfficeToolsManager(api_key=self.api_key)
+
+        # 初始化周报生成器
+        self.report_generator = WeeklyReportGenerator(api_key=self.api_key)
 
         # 构建 LangGraph 工作流
         self.workflow = self._build_workflow()
@@ -174,6 +178,38 @@ class OfficeAssistant:
             return "tool_execution"
         else:
             return "other"
+
+    def _report_generation_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
+        """周报生成节点：生成结构化周报"""
+        logger.info(f"进入周报生成节点：{state.user_input}")
+
+        # 使用周报生成器生成结构化周报
+        result = self.report_generator.generate_and_export(
+            user_input=state.user_input,
+            template="professional",
+            export_formats=['markdown']
+        )
+
+        if result.get('success'):
+            report_content = result.get('report_content', '')
+            file_paths = [f['path'] for f in result.get('exported_files', [])]
+
+            logger.info(f"周报生成成功，已导出到：{file_paths}")
+
+            response_text = f"{report_content}\n\n📁 周报已导出到：{', '.join(file_paths)}"
+
+            return {
+                "report_result": response_text,
+                "report_file_paths": file_paths,
+                "action_type": "report_generation"
+            }
+        else:
+            error_msg = result.get('error', '周报生成失败')
+            logger.error(f"周报生成失败：{error_msg}")
+            return {
+                "report_result": f"周报生成失败：{error_msg}",
+                "action_type": "report_generation"
+            }
 
     def _rag_query_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
         """RAG 节点：处理文档查询"""
@@ -337,6 +373,29 @@ class OfficeAssistant:
 
         return result.get("final_response", "未生成有效回复")
 
+    def generate_weekly_report(self, user_input: str,
+                               template: str = "professional",
+                               export_formats: List[str] = None) -> Dict[str, Any]:
+        """
+        直接调用周报生成器（不经过工作流）
+
+        Args:
+            user_input: 用户输入
+            template: 模板类型（professional/simple/detailed）
+            export_formats: 导出格式列表
+
+        Returns:
+            生成结果
+        """
+        if export_formats is None:
+            export_formats = ['markdown']
+
+        return self.report_generator.generate_and_export(
+            user_input=user_input,
+            template=template,
+            export_formats=export_formats
+        )
+
     def get_tool_statistics(self) -> Dict[str, Any]:
         """获取办公工具调用统计信息"""
         return self.office_tools_manager.get_tool_statistics()
@@ -353,6 +412,7 @@ if __name__ == "__main__":
         print("✅ 办公助手初始化成功")
         print("📦 已加载功能：")
         print("   • RAG 文档问答")
+        print("   • 结构化周报生成（支持 Markdown/Word 导出）")
         print("   • 周报自动生成")
         print("   • 实时搜索（行业资讯/新闻/天气）")
         print("   • 日历查询与管理")
@@ -401,10 +461,48 @@ if __name__ == "__main__":
         print("-" * 60)
 
     print("\n--- 阶段 4: 周报生成测试 ---")
-    report_query = "帮我写一份本周工作周报"
-    print(f"\n👤 用户：{report_query}")
-    response = assistant.run(report_query)
+
+    # 测试 1：简单输入
+    print("\n【测试 4.1】简单输入")
+    report_query_1 = "本周完成了 AI 项目开发，下周准备优化性能"
+    print(f"👤 用户：{report_query_1}")
+    response = assistant.run(report_query_1)
     print(f"🤖 助手：{response}")
+    print("-" * 60)
+
+    # 测试 2：详细输入
+    print("\n【测试 4.2】详细输入（使用周报生成器 API）")
+    report_query_2 = """
+    工作内容：
+    1. 完成办公助手系统开发
+    2. 集成实时搜索工具
+    3. 实现日历和待办功能
+
+    成果：系统响应速度提升 50%，用户满意度 95%
+
+    下周计划：
+    1. 添加更多办公工具
+    2. 优化用户体验
+    3. 编写技术文档
+
+    问题：API 调用超时，已通过重试机制解决
+    """
+    print(f"👤 用户：{report_query_2[:100]}...")
+
+    result = assistant.generate_weekly_report(
+        user_input=report_query_2,
+        template="professional",
+        export_formats=['markdown', 'word']
+    )
+
+    if result['success']:
+        print("✅ 周报生成成功")
+        print(f"\n📄 内容预览：\n{result['report_content'][:300]}...\n")
+        for file_info in result.get('exported_files', []):
+            print(f"📁 导出文件：{file_info['format']} -> {file_info['path']}")
+    else:
+        print(f"❌ 生成失败：{result.get('error')}")
+
     print("-" * 60)
 
     print("\n--- 阶段 5: 工具调用统计 ---")
