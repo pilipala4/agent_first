@@ -1,34 +1,35 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-办公助手LangGraph工作流实现
-基于llm_call.py脚本构建，实现文档查询RAG、周报生成等核心功能
+办公助手 LangGraph 工作流实现
+基于 llm_call.py 脚本构建，实现文档查询 RAG、周报生成、办公工具等功能
 """
 import os
 from typing import Dict, Any, List, Optional
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import HumanMessage, SystemMessage
-#from langchain_core.pydantic_v1 import BaseModel, Field
 from pydantic import BaseModel, Field
 from langchain_core.runnables import RunnableLambda
 import logger
 
 from rag.rag_system import DocumentRAG
 
-# 从llm_call.py导入LLMClient
+# 从 llm_call.py 导入 LLMClient
 from llm_call import LLMClient, llm_call
 from llm_call import DEFAULT_MODEL, DEFAULT_BASE_URL
 
+# 导入办公工具模块
+from tools.office_tools import OfficeToolsManager
 
 
 class OfficeAssistantState(BaseModel):
     """工作流状态模型"""
     user_input: str = Field(description="用户输入的原始问题")
     action_type: str = Field(default="其他", description="分析出的操作类型")
-    rag_result: Optional[str] = Field(default=None, description="RAG检索结果")
+    rag_result: Optional[str] = Field(default=None, description="RAG 检索结果")
     report_result: Optional[str] = Field(default=None, description="周报生成结果")
     tool_result: Optional[str] = Field(default=None, description="通用工具执行结果")
+    office_tool_result: Optional[str] = Field(default=None, description="办公工具执行结果")
     final_response: Optional[str] = Field(default=None, description="最终返回给用户的响应")
 
 
@@ -40,23 +41,26 @@ class OfficeAssistant:
         初始化办公助手
 
         Args:
-            api_key: 阿里云API密钥，如果未提供则从环境变量获取
+            api_key: 阿里云 API 密钥，如果未提供则从环境变量获取
         """
         self.api_key = api_key or os.getenv('DASHSCOPE_API_KEY')
         if not self.api_key:
-            raise ValueError("请设置DASHSCOPE_API_KEY环境变量")
+            raise ValueError("请设置 DASHSCOPE_API_KEY 环境变量")
 
-        # 初始化LLM客户端
+        # 初始化 LLM 客户端
         self.llm_client = LLMClient(api_key=self.api_key)
 
-        # 初始化 RAG 引擎 (新增)
+        # 初始化 RAG 引擎
         self.rag_engine = DocumentRAG(db_path=db_path)
 
-        # 构建LangGraph工作流
+        # 初始化办公工具管理器
+        self.office_tools_manager = OfficeToolsManager(api_key=self.api_key)
+
+        # 构建 LangGraph 工作流
         self.workflow = self._build_workflow()
 
     def _build_workflow(self) -> StateGraph:
-        """构建LangGraph工作流"""
+        """构建 LangGraph 工作流"""
         workflow = StateGraph(OfficeAssistantState)
 
         # 添加节点
@@ -64,6 +68,7 @@ class OfficeAssistant:
         workflow.add_node("decision", self._decision_node)
         workflow.add_node("rag_query", self._rag_query_node)
         workflow.add_node("report_generation", self._report_generation_node)
+        workflow.add_node("office_tools", self._office_tools_node)
         workflow.add_node("tool_execution", self._tool_execution_node)
         workflow.add_node("final_response", self._final_response_node)
 
@@ -78,10 +83,12 @@ class OfficeAssistant:
             {
                 "rag_query": "rag_query",
                 "report_generation": "report_generation",
+                "office_tools": "office_tools",
                 "tool_execution": "tool_execution",
                 "other": "tool_execution"
             }
         )
+        workflow.add_edge("office_tools", "final_response")
         workflow.add_edge("rag_query", "final_response")
         workflow.add_edge("report_generation", "final_response")
         workflow.add_edge("tool_execution", "final_response")
@@ -91,24 +98,25 @@ class OfficeAssistant:
 
     def _input_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
         """输入节点：接收用户输入"""
-        logger.info(f"接收用户输入: {state.user_input}")
+        logger.info(f"接收用户输入：{state.user_input}")
         return state
 
     def _decision_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
         """决策节点：分析用户意图，确定操作类型"""
         decision_prompt = f"""
         请分析以下用户输入，并确定需要执行的操作类型。操作类型包括：
-        - rag_query: 文档查询（涉及文档、资料、信息检索）
+        - rag_query: 文档查询（涉及文档、资料、信息检索，特别是技术文档、论文等）
         - report_generation: 周报生成（涉及报告、总结、工作汇报）
-        - tool_execution: 其他操作（日程安排、邮件处理等）
+        - office_tools: 办公工具（涉及日程查询、待办事项、日历管理、实时搜索等）
+        - tool_execution: 其他操作（通用工具调用）
         - other: 无法确定的操作类型
 
-        用户输入: {state.user_input}
+        用户输入：{state.user_input}
 
         请只返回操作类型，不要包含其他内容。
         """
 
-        # 使用LLM进行决策
+        # 使用 LLM 进行决策
         response = llm_call(
             prompt=decision_prompt,
             system_prompt="你是一个办公助手决策系统，负责分析用户需求并分类",
@@ -130,15 +138,18 @@ class OfficeAssistant:
         if is_success:
             action_type = str(result_data).strip().lower()
 
-            # 优化决策结果 (保持原有逻辑)
-            if "文档" in state.user_input or "资料" in state.user_input or "查询" in state.user_input or \
-               "模型" in state.user_input or "论文" in state.user_input or "技术" in state.user_input or \
-               "HIC-YOLOv5" in state.user_input or "YOLOv5" in state.user_input:
+            # 优化决策结果 - 优先匹配办公工具关键词
+            if "日程" in state.user_input or "会议" in state.user_input or "安排" in state.user_input or \
+                    "待办" in state.user_input or "日历" in state.user_input or "任务" in state.user_input or \
+                    "搜索" in state.user_input or "资讯" in state.user_input or "新闻" in state.user_input or \
+                    "天气" in state.user_input:
+                action_type = "office_tools"
+            elif "文档" in state.user_input or "资料" in state.user_input or "查询" in state.user_input or \
+                    "模型" in state.user_input or "论文" in state.user_input or "技术" in state.user_input or \
+                    "HIC-YOLOv5" in state.user_input or "YOLOv5" in state.user_input:
                 action_type = "rag_query"
             elif "周报" in state.user_input or "报告" in state.user_input or "总结" in state.user_input:
                 action_type = "report_generation"
-            elif "日程" in state.user_input or "会议" in state.user_input or "安排" in state.user_input:
-                action_type = "tool_execution"
             else:
                 action_type = "other"
 
@@ -151,22 +162,28 @@ class OfficeAssistant:
     def _route_decision(self, state: OfficeAssistantState) -> str:
         """路由决策：根据决策结果确定下一个节点"""
         action_type = state.action_type
-        logger.debug(f"路由决策: {action_type}")
+        logger.debug(f"路由决策：{action_type}")
 
-        if action_type in ["rag_query", "report_generation", "tool_execution"]:
-            return action_type
+        if action_type == "rag_query":
+            return "rag_query"
+        elif action_type == "report_generation":
+            return "report_generation"
+        elif action_type == "office_tools":
+            return "office_tools"
+        elif action_type == "tool_execution":
+            return "tool_execution"
         else:
             return "other"
 
     def _rag_query_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
-        """RAG节点：处理文档查询"""
+        """RAG 节点：处理文档查询"""
         rag_prompt = f"""
         你是一个文档问答助手，请基于以下检索到的文档内容回答用户问题：
 
         文档内容摘要:
         {self._get_document_context(state.user_input)}
 
-        用户问题: {state.user_input}
+        用户问题：{state.user_input}
 
         请用简洁明了的语言回答问题，不要提及文档内容。
         """
@@ -197,13 +214,11 @@ class OfficeAssistant:
     def _get_document_context(self, query: str) -> str:
         """调用 RAG 引擎进行真实文档检索"""
         try:
-            # 执行向量检索，返回前 3 个最相关的片段
             results = self.rag_engine.query(question=query, n_results=3)
 
             if not results:
                 return "未找到相关文档内容。"
 
-            # 格式化检索结果
             context_parts = []
             for i, res in enumerate(results):
                 source = res['metadata'].get('source', '未知来源')
@@ -231,12 +246,12 @@ class OfficeAssistant:
         report_prompt = f"""
         请生成一份专业的周报，基于以下信息：
 
-        本周工作主题: {state.user_input}
+        本周工作主题：{state.user_input}
 
         周报要求：
-        1. 本周工作总结（3-4点）
-        2. 下周工作计划（3-4点）
-        3. 遇到的问题及解决方案（2-3点）
+        1. 本周工作总结（3-4 点）
+        2. 下周工作计划（3-4 点）
+        3. 遇到的问题及解决方案（2-3 点）
         4. 重要事项提醒
 
         请用简洁专业的语言，使用正式的商务语气。
@@ -261,63 +276,92 @@ class OfficeAssistant:
             logger.info("周报生成成功")
             return {"report_result": result_data}
         else:
-            logger.error(f"周报生成失败: {error_msg}")
-            return {"report_result": f"周报生成失败: {error_msg}"}
+            logger.error(f"周报生成失败：{error_msg}")
+            return {"report_result": f"周报生成失败：{error_msg}"}
+
+    def _office_tools_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
+        """办公工具节点：处理日程查询、待办管理、实时搜索等办公需求"""
+        logger.info(f"进入办公工具节点：{state.user_input}")
+
+        result = self.office_tools_manager.execute_office_tool(state.user_input)
+
+        if result.get('success'):
+            logger.info(f"办公工具执行成功：{result.get('tool_used')}")
+            return {
+                "office_tool_result": result.get('result'),
+                "action_type": "office_tools"
+            }
+        else:
+            logger.error(f"办公工具执行失败：{result.get('error')}")
+            if result.get('degraded'):
+                return {
+                    "office_tool_result": result.get('error'),
+                    "action_type": "office_tools"
+                }
+            else:
+                return {
+                    "office_tool_result": f"抱歉，处理您的请求时出现问题：{result.get('error')}",
+                    "action_type": "office_tools"
+                }
 
     def _tool_execution_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
         """工具执行节点：处理其他操作"""
-        # 实际应用中这里应调用具体工具API
-        tool_result = f"已处理您的请求: {state.user_input}"
-
-        logger.info(f"工具执行: {tool_result}")
+        tool_result = f"已处理您的请求：{state.user_input}"
+        logger.info(f"工具执行：{tool_result}")
         return {"tool_result": tool_result}
 
     def _final_response_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
         """最终响应节点：整合结果并生成最终回复"""
-        # 根据操作类型选择结果
-        if state.rag_result:
-            final_response = f"文档查询结果: {state.rag_result}"
+        if state.office_tool_result:
+            final_response = state.office_tool_result
+        elif state.rag_result:
+            final_response = f"文档查询结果：{state.rag_result}"
         elif state.report_result:
-            final_response = f"周报生成结果: {state.report_result}"
+            final_response = f"周报生成结果：{state.report_result}"
         elif state.tool_result:
-            final_response = f"操作执行结果: {state.tool_result}"
+            final_response = f"操作执行结果：{state.tool_result}"
         else:
             final_response = "未找到相关操作结果，请重试。"
 
-        logger.info(f"生成最终响应: {final_response}")
+        logger.info(f"生成最终响应：{final_response}")
         return {"final_response": final_response}
 
     def run(self, user_input: str) -> str:
         """运行工作流并返回最终响应"""
-        # 初始化状态时可以直接传字典，LangGraph 会自动处理
         initial_state = {
             "user_input": user_input,
             "action_type": "其他"
         }
 
-        # invoke 返回的是最终状态的字典
         result = self.workflow.invoke(initial_state)
 
-        # 通过字典键访问 final_response
         return result.get("final_response", "未生成有效回复")
+
+    def get_tool_statistics(self) -> Dict[str, Any]:
+        """获取办公工具调用统计信息"""
+        return self.office_tools_manager.get_tool_statistics()
 
 
 # 测试示例
 if __name__ == "__main__":
-    print("=" * 50)
-    print("办公助手LangGraph工作流测试")
-    print("=" * 50)
+    print("=" * 60)
+    print("办公助手 LangGraph 工作流测试 - 整合办公工具模块")
+    print("=" * 60)
 
     try:
-        # 初始化助手 (会自动初始化 RAG 引擎)
         assistant = OfficeAssistant()
         print("✅ 办公助手初始化成功")
+        print("📦 已加载功能：")
+        print("   • RAG 文档问答")
+        print("   • 周报自动生成")
+        print("   • 实时搜索（行业资讯/新闻/天气）")
+        print("   • 日历查询与管理")
+        print("   • 待办清单管理")
+        print("=" * 60)
     except ValueError as e:
         print(f"❌ 初始化失败：{e}")
         exit(1)
 
-        # 1. 准备测试文档 (请确保当前目录下有这些文件，或修改为实际路径)
-        # 假设当前目录下有一个 test_report.pdf 和 meeting_notes.docx
     test_files = [
         "2309.16393v2.pdf",
     ]
@@ -329,18 +373,48 @@ if __name__ == "__main__":
         else:
             print(f"⚠️ 跳过不存在的文件：{file}")
 
-    # 2. 执行问答测试
-    print("\n--- 阶段 2: 智能问答测试 ---")
-    test_queries = [
-        "HIC-YOLOv5模型的最新进展是什么？",  # 从PDF中可以找到关于HIC-YOLOv5的改进
-        "HIC-YOLOv5相比原始YOLOv5有哪些改进？",  # PDF中详细描述了改进点
-        "帮我写一份本周工作周报"  # 测试非RAG路径
+    print("\n--- 阶段 2: RAG 文档问答测试 ---")
+    rag_queries = [
+        "HIC-YOLOv5 模型的最新进展是什么？",
+        "HIC-YOLOv5 相比原始 YOLOv5 有哪些改进？"
     ]
 
-    for query in test_queries:
+    for query in rag_queries:
         print(f"\n👤 用户：{query}")
         response = assistant.run(query)
         print(f"🤖 助手：{response}")
-        print("-" * 50)
+        print("-" * 60)
 
-    print("\n测试完成！")
+    print("\n--- 阶段 3: 办公工具功能测试 ---")
+    office_queries = [
+        ("搜索今天的人工智能行业新闻", "实时搜索"),
+        ("查询今天的日程安排", "日历查询"),
+        ("添加一个待办事项：下午 3 点参加项目会议", "待办添加"),
+        ("查看我的待办清单", "待办列表"),
+        ("明天广州天气怎么样", "天气搜索")
+    ]
+
+    for query, desc in office_queries:
+        print(f"\n👤 用户 ({desc}): {query}")
+        response = assistant.run(query)
+        print(f"🤖 助手：{response}")
+        print("-" * 60)
+
+    print("\n--- 阶段 4: 周报生成测试 ---")
+    report_query = "帮我写一份本周工作周报"
+    print(f"\n👤 用户：{report_query}")
+    response = assistant.run(report_query)
+    print(f"🤖 助手：{response}")
+    print("-" * 60)
+
+    print("\n--- 阶段 5: 工具调用统计 ---")
+    stats = assistant.get_tool_statistics()
+    print("📊 工具调用统计:")
+    print(f"   总调用次数：{stats.get('total_calls', 0)}")
+    print(f"   成功次数：{stats.get('successful_calls', 0)}")
+    print(f"   失败次数：{stats.get('failed_calls', 0)}")
+    print(f"   重试次数：{stats.get('retry_count', 0)}")
+    print(f"   成功率：{stats.get('success_rate', '0%')}")
+    print("=" * 60)
+
+    print("\n✅ 所有测试完成！")
