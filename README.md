@@ -73,8 +73,9 @@ agent_first/
 ## 🧪 运行测试
 
 **全功能测试：**
-python test/test_all_features.py
-
+python run_all_tests.py
+**核心功能测试：**
+python quick_test.py
 ---
 
 **版本**: V1.1  
