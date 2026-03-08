@@ -1,5 +1,4 @@
-|NEW_FILE_CODE|README.md
-# 智能办公助手 V1.0
+# 智能办公助手 V1.1
 
 > 一站式办公解决方案：文档问答 + 周报生成 + 工具调用 + 记忆管理
 
@@ -65,7 +64,12 @@ report 本周完成了项目开发，下周继续优
 ### 4. 系统命令
 help / h - 查看帮助 history 或 hist 查看历史 search 关键词 搜索历史 clear / cls - 清空对话历史 quit / exit - 退出系统
 ## 📁 项目结构
-agent_first/ ├── main.py # 主入口（智能办公助手） ├── rag/ # RAG 文档问答模块 │ └── rag_system.py ├── tools/ # 工具模块 │ ├── office_tools.py # 办公工具管理器 │ ├── weekly_report_generator.py # 周报生成器 │ └── tool_encapsulation.py # 工具封装 ├── test/ # 测试目录 │ ├── test_all_features.py # 全功能测试 │ └── test_weekly_report.py # 周报测试 ├── generated_reports/ # 生成的周报文件 ├── chroma_db/ # RAG 向量数据库 ├── llm_call.py # LLM 调用封装 └── logger.py # 日志模块
+agent_first/ 
+├── main.py # 主入口（智能办公助手） 
+├── rag/ # RAG 文档问答模块 │ └── rag_system.py 
+├── tools/ # 工具模块 │ ├── office_tools.py # 办公工具管理器 │ ├── weekly_report_generator.py # 周报生成器 │ └── tool_encapsulation.py # 工具封装 
+├── test/ # 测试目录 │ ├── test_all_features.py # 全功能测试 │ └── test_weekly_report.py # 周报测试 
+├── generated_reports/ # 生成的周报文件 ├── chroma_db/ # RAG 向量数据库 ├── llm_call.py # LLM 调用封装 └── logger.py # 日志模块
 ## 🧪 运行测试
 
 **全功能测试：**
