@@ -24,8 +24,8 @@ from tools.tool_encapsulation import ToolManager
 class MemoryEntry(BaseModel):
     """记忆条目模型"""
     role: str = Field(description="角色：user 或 assistant")
-    content: str = Field(description="内容")
-    timestamp: str = Field(description="时间戳")
+    content: str = Field(default="",description="内容")
+    timestamp: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),description="时间戳")
     action_type: Optional[str] = Field(default=None, description="操作类型")
 
 
@@ -224,6 +224,17 @@ class SmartOfficeAssistant:
 
     def _decision_node(self, state: OfficeAssistantState) -> Dict[str, Any]:
         """决策节点：分析用户意图"""
+
+        # 构建历史上下文
+        history_context = ""
+        if state.conversation_history:
+            history_lines = []
+            for msg in state.conversation_history[-5:]:  # 最近 5 条
+                role_text = "用户" if msg["role"] == "user" else "助手"
+                history_lines.append(f"{role_text}: {msg['content']}")
+            history_context = "\n".join(history_lines) + "\n\n"
+
+
         decision_prompt = f"""
 请分析用户输入，确定需要执行的操作类型：
 
@@ -232,6 +243,9 @@ class SmartOfficeAssistant:
 - report_generation: 周报生成（涉及报告、总结、工作汇报等）
 - office_tools: 办公工具（涉及日程、会议、待办、搜索、天气、新闻等）
 - other: 其他或闲聊
+
+对话历史：
+{history_context if history_context else "无历史对话"}
 
 用户输入：{state.user_input}
 
@@ -265,12 +279,33 @@ class SmartOfficeAssistant:
                 logger.info(f"决策结果：{action_type}")
                 return {"action_type": action_type}
             else:
-                logger.error(f"决策失败：{response.get('error_message')}")
-                return {"action_type": "other"}
+                error_msg = response.get('error_message', '未知错误') if isinstance(response, dict) else '未知错误'
+                logger.error(f"决策失败：{error_msg}")
+                # 使用关键词 fallback
+                input_lower = state.user_input.lower()
+                if any(kw in input_lower for kw in
+                       ['日程', '会议', '待办', '日历', '任务', '搜索', '资讯', '新闻', '天气']):
+                    return {"action_type": "office_tools"}
+                elif any(kw in input_lower for kw in ['文档', '资料', '论文', '查询', '模型', '技术']):
+                    return {"action_type": "rag_query"}
+                elif any(kw in input_lower for kw in ['周报', '报告', '总结', '汇报']):
+                    return {"action_type": "report_generation"}
+                else:
+                    return {"action_type": "other"}
 
         except Exception as e:
             logger.error(f"决策异常：{e}")
-            return {"action_type": "other"}
+            # 异常时使用简单规则判断
+            input_lower = state.user_input.lower()
+            if any(kw in input_lower for kw in
+                   ['日程', '会议', '待办', '日历', '任务', '搜索', '资讯', '新闻', '天气']):
+                return {"action_type": "office_tools"}
+            elif any(kw in input_lower for kw in ['文档', '资料', '论文', '查询', '模型', '技术']):
+                return {"action_type": "rag_query"}
+            elif any(kw in input_lower for kw in ['周报', '报告', '总结', '汇报']):
+                return {"action_type": "report_generation"}
+            else:
+                return {"action_type": "other"}
 
     def _route_decision(self, state: OfficeAssistantState) -> str:
         """路由决策"""
@@ -316,6 +351,15 @@ class SmartOfficeAssistant:
 
             context = "\n\n---\n\n".join(context_parts)
 
+            # 构建历史上下文
+            history_context = ""
+            if state.conversation_history:
+                history_lines = []
+                for msg in state.conversation_history[-5:]:
+                    role_text = "用户" if msg["role"] == "user" else "助手"
+                    history_lines.append(f"{role_text}: {msg['content']}")
+                history_context = "\n".join(history_lines) + "\n\n"
+
             # 调用 LLM 生成答案
             rag_prompt = f"""
 你是一个专业的文档问答助手。请基于以下检索到的文档内容回答用户问题：
@@ -323,9 +367,12 @@ class SmartOfficeAssistant:
 文档内容：
 {context}
 
+对话历史：
+{history_context if history_context else "无历史对话"}
+
 用户问题：{state.user_input}
 
-请用简洁明了的语言回答问题，不要提及文档来源。
+请用简洁明了的语言回答问题，不要提及文档来源。如果问题与历史对话相关，请结合上下文理解。
 """
 
             response = llm_call(
@@ -435,12 +482,24 @@ class SmartOfficeAssistant:
             final_response = state.report_result
         else:
             # 其他情况：使用通用对话
+            # 构建历史上下文
+            history_context = ""
+            if state.conversation_history:
+                history_lines = []
+                for msg in state.conversation_history[-5:]:
+                    role_text = "用户" if msg["role"] == "user" else "助手"
+                    history_lines.append(f"{role_text}: {msg['content']}")
+                history_context = "\n".join(history_lines) + "\n\n"
+
             general_prompt = f"""
 你是一个友好的办公助手。请回复用户的问题：
 
+对话历史：
+{history_context if history_context else "无历史对话"}
+
 用户输入：{state.user_input}
 
-请用友好、专业的语气回复。
+请用友好、专业的语气回复。如果用户提到了之前的对话内容，请结合上下文理解。
 """
             try:
                 response = llm_call(
@@ -449,8 +508,7 @@ class SmartOfficeAssistant:
                     model=DEFAULT_MODEL,
                     retry_times=2
                 )
-                final_response = response.get('data', '我无法理解您的问题，请换个方式描述。') if isinstance(response,
-                                                                                                          dict) else '我无法理解您的问题。'
+                final_response = response.get('data', '我无法理解您的问题，请换个方式描述。') if isinstance(response, dict) else '我无法理解您的问题。'
             except:
                 final_response = "我无法理解您的问题，请换个方式描述。"
 
@@ -467,11 +525,19 @@ class SmartOfficeAssistant:
 
         result = self.workflow.invoke(initial_state)
 
-        # 添加到记忆
-        self.memory.add_memory("user", user_input, action_type=result.get("action_type"))
-        self.memory.add_memory("assistant", result.get("final_response", ""), action_type=result.get("action_type"))
+        # 确保 final_response 不为 None
+        final_response = result.get("final_response")
+        if not final_response:
+            final_response = "抱歉，处理您的请求时出现了问题，请稍后重试。"
 
-        return result.get("final_response", "未生成有效回复")
+        # 确保 action_type 有值
+        action_type = result.get("action_type", "其他")
+
+        # 添加到记忆（确保 content 不为 None）
+        self.memory.add_memory("user", user_input, action_type=action_type)
+        self.memory.add_memory("assistant", final_response, action_type=action_type)
+
+        return final_response
 
     def upload_document(self, file_path: str) -> str:
         """上传文档到 RAG 系统"""
